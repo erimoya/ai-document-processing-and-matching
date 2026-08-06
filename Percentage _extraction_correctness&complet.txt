@@ -1,0 +1,81 @@
+-- Extraction correctness & completeness analysis for ai_extraction_pdf
+WITH validation AS (
+  SELECT
+    path,
+    datum,
+    naam,
+    omschrijving,
+    aantal,
+    tarief,
+    subtotaal,
+    -- Check if subtotaal matches expected calculation (aantal * tarief) within 2% tolerance
+    CASE
+      WHEN aantal IS NOT NULL AND tarief IS NOT NULL AND subtotaal IS NOT NULL
+        THEN ABS(subtotaal - (aantal * tarief)) / NULLIF(subtotaal, 0) <= 0.02
+      ELSE FALSE
+    END AS subtotaal_correct,
+    (datum IS NOT NULL) AS datum_extracted,
+    (naam IS NOT NULL) AS naam_extracted,
+    (omschrijving IS NOT NULL) AS omschrijving_extracted,
+    (aantal IS NOT NULL) AS aantal_extracted,
+    (tarief IS NOT NULL) AS tarief_extracted,
+    (subtotaal IS NOT NULL) AS subtotaal_extracted
+  FROM workspace.default.ai_extraction_pdf
+),
+-- Extract invoice totals from OCR text to measure extraction completeness
+invoice_totals AS (
+  SELECT DISTINCT
+    path,
+    ocr_text,
+    -- Derive expected total excl BTW from different vendor formats:
+    COALESCE(
+      -- Olympia: "ex BTW" or "excl BTW" amount (Dutch comma format)
+      TRY_CAST(REPLACE(REPLACE(
+        NULLIF(regexp_extract(ocr_text, '(?si)(?:excl?\\.?\\s*BTW)[^\\d]{0,30}([\\d.]+,\\d{2})', 1), ''),
+        '.', ''), ',', '.') AS DOUBLE),
+      -- Covebo: subtotaal line in summary section
+      TRY_CAST(REPLACE(REPLACE(
+        NULLIF(regexp_extract(ocr_text, '(?si)\\(subtotaal\\)</td><td[^>]*>[^<]*</td><td[^>]*>([\\d.]+,\\d{2})</td>', 1), ''),
+        '.', ''), ',', '.') AS DOUBLE),
+      -- Timing/Buddo: derive from payment split (G-rek 25% + Restant 75% = total incl BTW / 1.21)
+      (
+        TRY_CAST(REPLACE(REPLACE(
+          NULLIF(regexp_extract(ocr_text, '(?si)G-rek[^€]*€([\\d.]+,\\d{2})', 1), ''),
+          '.', ''), ',', '.') AS DOUBLE)
+        +
+        TRY_CAST(REPLACE(REPLACE(
+          NULLIF(regexp_extract(ocr_text, '(?si)Restant[^€]*€([\\d.]+,\\d{2})', 1), ''),
+          '.', ''), ',', '.') AS DOUBLE)
+      ) / 1.21
+    ) AS invoice_total_excl_btw
+  FROM workspace.default.ai_extraction_pdf
+),
+-- Sum extracted amounts per PDF
+extracted_totals AS (
+  SELECT
+    path,
+    ROUND(SUM(subtotaal), 2) AS extracted_sum
+  FROM workspace.default.ai_extraction_pdf
+  GROUP BY path
+)
+-- Final report
+SELECT
+  -- Row-level correctness
+  COUNT(*) AS total_rows,
+  ROUND(100.0 * SUM(CASE WHEN v.subtotaal_correct THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_subtotaal_correct,
+  ROUND(100.0 * SUM(CASE WHEN v.datum_extracted THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_datum_filled,
+  ROUND(100.0 * SUM(CASE WHEN v.naam_extracted THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_naam_filled,
+  ROUND(100.0 * SUM(CASE WHEN v.subtotaal_correct AND v.datum_extracted AND v.naam_extracted AND v.omschrijving_extracted THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_fully_correct,
+  -- Invoice-level extraction completeness (sum of line items vs invoice total)
+  COUNT(DISTINCT v.path) AS total_pdfs,
+  SUM(CASE WHEN it.invoice_total_excl_btw IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*) AS pdfs_with_known_total,
+  ROUND(100.0 * AVG(
+    CASE
+      WHEN it.invoice_total_excl_btw IS NOT NULL AND it.invoice_total_excl_btw > 0
+        THEN LEAST(et.extracted_sum / it.invoice_total_excl_btw, 1.0)
+      ELSE NULL
+    END
+  ), 1) AS avg_pct_amount_extracted
+FROM validation v
+JOIN invoice_totals it ON v.path = it.path
+JOIN extracted_totals et ON v.path = et.path

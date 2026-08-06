@@ -1,0 +1,4 @@
+REPLACE TABLE quinyx_uitzendkrachten_summary AS
+SELECT FISCYEAR, SUM(Uren_gewerkt) AS Uren_gewerkt_sum, SUM(Brutoloon) AS Brutoloon_sum, ANY_VALUE(NAAM) AS NAAM_value, CC_WEEK
+FROM `4v_quinyx_uitzendkrachten`
+GROUP BY FISCYEAR, CC_WEEK, NAAM

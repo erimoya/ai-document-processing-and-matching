@@ -1,0 +1,4 @@
+CREATE OR REPLACE TABLE pdf_summary AS
+SELECT datum, weeknummer, jaar, naam, bedrijf, factuurnummer, SUM(aantal) AS totaal_aantal, SUM(subtotaal) AS totaal
+FROM aiextraction_pdf_results
+GROUP BY datum, weeknummer, jaar, naam, bedrijf, factuurnummer

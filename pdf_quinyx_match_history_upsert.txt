@@ -1,0 +1,28 @@
+ -- STEP 2: Upsert — insert only net-new records (no duplicates)
+MERGE INTO quinyxdata.default.pdf_quinyx_match_history AS target
+USING (
+  SELECT
+    sha2(concat_ws('|',
+      coalesce(cast(jaar AS STRING), ''),
+      coalesce(cast(weeknummer AS STRING), ''),
+      coalesce(pdf_naam, '')
+    ), 256) AS record_hash,
+    datum,
+    weeknummer,
+    jaar,
+    bedrijf,
+    factuurnummer,
+    pdf_naam,
+    quinyx_naam,
+    pdf_uren,
+    quinyx_uren,
+    verschil_uren,
+    pdf_totaal,
+    quinyx_totaal,
+    verschil_totaal,
+    current_user()      AS upload_user,
+    current_timestamp() AS upload_timestamp
+  FROM quinyxdata.default.pdf_quinyx_fuzzy_match
+) AS source
+ON target.record_hash = source.record_hash
+WHEN NOT MATCHED THEN INSERT *;
