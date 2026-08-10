@@ -1,0 +1,4 @@
+REPLACE TABLE 4V_WorkedHours_summary AS
+SELECT FISCYEAR, SUM(Uren_gewerkt) AS Uren_gewerkt_sum, SUM(Brutoloon) AS Brutoloon_sum, ANY_VALUE(NAAM) AS NAAM_value, CC_WEEK
+FROM `4V_WorkedHours`
+GROUP BY FISCYEAR, CC_WEEK, NAAM

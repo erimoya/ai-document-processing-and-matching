@@ -1,0 +1,28 @@
+ -- STEP 2: Upsert — insert only net-new records (no duplicates)
+MERGE INTO workspace.default.pdf_workedhours_match_history AS target
+USING (
+  SELECT
+    sha2(concat_ws('|',
+      coalesce(cast(jaar AS STRING), ''),
+      coalesce(cast(weeknummer AS STRING), ''),
+      coalesce(pdf_naam, '')
+    ), 256) AS record_hash,
+    datum,
+    weeknummer,
+    jaar,
+    bedrijf,
+    factuurnummer,
+    pdf_naam,
+    workedhours_naam,
+    pdf_uren,
+    workedhours_uren,
+    verschil_uren,
+    pdf_totaal,
+    workedhours_totaal,
+    verschil_totaal,
+    current_user()      AS upload_user,
+    current_timestamp() AS upload_timestamp
+  FROM workspace.default.pdf_workedhours_fuzzy_match
+) AS source
+ON target.record_hash = source.record_hash
+WHEN NOT MATCHED THEN INSERT *;

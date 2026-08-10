@@ -1,0 +1,94 @@
+-- Fuzzy join pdf_summary ↔ 4V_WorkedHours_summary
+CREATE OR REPLACE TABLE workspace.default.pdf_workedhours_fuzzy_match AS WITH pdf_norm AS (
+  SELECT
+    datum, weeknummer, jaar, naam, totaal_aantal, totaal,
+    bedrijf, factuurnummer,
+    array_join(
+      array_sort(
+        split(regexp_replace(lower(trim(naam)), '[^a-z\\s]', ''), '\\s+')
+      ), ' '
+    ) AS naam_normalized
+  FROM workspace.default.pdf_summary
+),
+workedhours_weekly AS (
+  -- Aggregate WorkedHours daily rows to week level
+  SELECT
+    FISCYEAR,
+    CC_WEEK,
+    NAAM_value,
+    SUM(Uren_gewerkt_sum) AS uren_gewerkt_week,
+    SUM(Brutoloon_sum)    AS brutoloon_week
+  FROM workspace.default.4V_WorkedHours_summary
+  GROUP BY FISCYEAR, CC_WEEK, NAAM_value
+),
+workedhours_norm AS (
+  SELECT
+    *,
+    array_join(
+      array_sort(
+        split(regexp_replace(lower(trim(NAAM_value)), '[^a-z\\s]', ''), '\\s+')
+      ), ' '
+    ) AS naam_normalized
+  FROM workedhours_weekly
+),
+joined AS (
+  -- LEFT JOIN on week/year only; name similarity computed per pair
+  SELECT
+    p.datum,
+    p.weeknummer,
+    p.jaar,
+    p.bedrijf,
+    p.factuurnummer,
+    p.naam                        AS pdf_naam,
+    q.NAAM_value                  AS workedhours_naam,
+    ROUND(p.totaal_aantal, 2)     AS pdf_uren,
+    ROUND(q.uren_gewerkt_week, 2) AS workedhours_uren,
+    ROUND(p.totaal, 2)            AS pdf_totaal,
+    ROUND(q.brutoloon_week, 2)    AS workedhours_totaal,
+    levenshtein(p.naam_normalized, q.naam_normalized)                  AS edit_distance,
+    GREATEST(length(p.naam_normalized), length(q.naam_normalized), 1) AS max_name_len
+  FROM pdf_norm p
+  LEFT JOIN workedhours_norm q
+    ON p.jaar        = CAST(q.FISCYEAR AS INT)
+   AND p.weeknummer = CAST(q.CC_WEEK  AS INT)
+),
+best_match AS (
+  -- Pick the single best-matching WorkedHours row per PDF row.
+  -- NULLS LAST ensures unmatched rows (no WorkedHours entry for that week) get rn=1.
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY datum, pdf_naam, factuurnummer
+      ORDER BY edit_distance ASC NULLS LAST
+    ) AS rn
+  FROM joined
+),
+matched AS (
+  -- Keep only the best candidate per PDF row and flag whether it clears the threshold.
+  SELECT *,
+    CASE
+      WHEN edit_distance IS NULL
+        OR 1 - (edit_distance / max_name_len) >= 0.8 THEN TRUE
+      ELSE FALSE
+    END AS is_matched
+  FROM best_match
+  WHERE rn = 1
+)
+SELECT
+  datum,
+  weeknummer,
+  jaar,
+  bedrijf,
+  factuurnummer,
+  pdf_naam,
+  CASE WHEN is_matched
+    THEN COALESCE(workedhours_naam, 'Nog niet geregistreerd bij WorkedHours')
+    ELSE 'Nog niet geregistreerd bij WorkedHours'
+  END                                                                        AS workedhours_naam,
+  pdf_uren,
+  CASE WHEN is_matched THEN workedhours_uren  ELSE NULL END                       AS workedhours_uren,
+  ROUND(CASE WHEN is_matched THEN workedhours_uren  ELSE NULL END - pdf_uren, 2) AS verschil_uren,
+  pdf_totaal,
+  CASE WHEN is_matched THEN workedhours_totaal ELSE NULL END                      AS workedhours_totaal,
+  ROUND(CASE WHEN is_matched THEN workedhours_totaal ELSE NULL END - pdf_totaal, 2) AS verschil_totaal
+FROM matched
+ORDER BY jaar, weeknummer, pdf_naam
